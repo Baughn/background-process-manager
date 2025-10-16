@@ -194,6 +194,43 @@ background-process-manager ~/dev/ganbot
 # Now connect from Claude Code using the configuration above
 ```
 
+## TUI (Terminal User Interface)
+
+A built-in TUI is available for manual interaction with the MCP server:
+
+```bash
+# Run the TUI (connects to default localhost:3001)
+bpm-tui
+
+# Or specify a custom MCP server URL
+bpm-tui http://localhost:3001/mcp
+```
+
+### TUI Features
+
+The TUI provides a comprehensive dashboard with four panels:
+
+- **Server Status** (top-left): Connection state, mode, process counts, status messages
+- **Process Details** (top-right): Selected process info, uptime, events, crash count
+- **Processes** (bottom-left): List of all managed processes with state indicators
+- **Output** (bottom-right): Live logs from the selected process
+
+### TUI Keyboard Shortcuts
+
+- `▲▼` or `j/k` - Navigate process list
+- `Enter` - Refresh logs for selected process
+- `r` - Restart selected process (rebuilds first, then restarts)
+- `c` - Clear output panel
+- `q` or `Esc` - Quit
+
+### TUI Status Indicators
+
+- 🟢 Green `▶` - Process is running
+- 🟡 Yellow `■` - Process is stopped/idle
+- 🔴 Red `✗` - Process has crashed
+
+The TUI auto-refreshes status every second and provides real-time feedback for all operations.
+
 ## Architecture
 
 ```

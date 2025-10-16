@@ -90,5 +90,11 @@
         apps.default = flake-utils.lib.mkApp {
           drv = self.packages.${system}.default;
         };
+
+        # App for running the TUI
+        apps.tui = flake-utils.lib.mkApp {
+          drv = self.packages.${system}.default;
+          name = "bpm-tui";
+        };
       });
 }
