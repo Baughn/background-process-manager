@@ -1,0 +1,32 @@
+# Example configuration for background-process-manager
+# Copy this to your project directory as .mcp-run and customize
+
+# Port for the MCP server to listen on
+mcp_port = 3000
+
+# Time in hours before switching to release mode (optional, default: 3)
+dev_timeout_hours = 3
+
+# Wait time in seconds after a crash in dev mode (optional, default: 120)
+dev_crash_wait_seconds = 120
+
+# Initial backoff in seconds for crash recovery in release mode (optional, default: 1)
+release_crash_backoff_initial_seconds = 1
+
+# Maximum backoff in seconds for crash recovery in release mode (optional, default: 300)
+release_crash_backoff_max_seconds = 300
+
+# Define processes to manage
+# Each process has a name (the key in brackets) and configuration
+
+[process.main]
+# Type of process: "rust" or "npm"
+type = "rust"
+
+# Optional: Arguments to pass to the binary
+args = ["--port", "8080"]
+
+# Example of an NPM sidecar process
+# [process.frontend]
+# type = "npm"
+# command = ["npm", "run", "dev"]
