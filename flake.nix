@@ -5,9 +5,13 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
+    crate2nix = {
+      url = "github:nix-community/crate2nix";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils, ... }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, crate2nix, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -17,6 +21,21 @@
 
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
+        };
+
+        # Import crate2nix tools
+        inherit (import "${crate2nix}/tools.nix" { inherit pkgs; })
+          generatedCargoNix;
+
+        # Generate the Cargo.nix and import the project
+        project = import (generatedCargoNix {
+          name = "background-process-manager";
+          src = ./.;
+        }) {
+          inherit pkgs;
+          defaultCrateOverrides = pkgs.defaultCrateOverrides // {
+            # Add any crate-specific overrides here if needed
+          };
         };
 
         buildInputs = with pkgs; [
@@ -68,33 +87,23 @@
           '';
         };
 
-        # Package definition (for building the manager)
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "background-process-manager";
-          version = "0.1.0";
+        # Package definitions (using crate2nix)
+        # Both binaries are built together since they're in the same crate
+        packages = {
+          default = project.workspaceMembers.background-process-manager.build;
+          bpm-tui = project.workspaceMembers.background-process-manager.build;
+        };
 
-          src = ./.;
-
-          cargoLock = {
-            lockFile = ./Cargo.lock;
+        # Apps for running the binaries
+        apps = {
+          default = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.default;
+            name = "background-process-manager";
           };
-
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = with pkgs; [ openssl ];
-
-          # Skip tests during build (run them separately)
-          doCheck = false;
-        };
-
-        # App for running the manager
-        apps.default = flake-utils.lib.mkApp {
-          drv = self.packages.${system}.default;
-        };
-
-        # App for running the TUI
-        apps.tui = flake-utils.lib.mkApp {
-          drv = self.packages.${system}.default;
-          name = "bpm-tui";
+          tui = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.bpm-tui;
+            name = "bpm-tui";
+          };
         };
       });
 }
