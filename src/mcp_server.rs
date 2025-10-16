@@ -123,7 +123,7 @@ impl AppState {
             "tools": [
                 {
                     "name": "search_logs",
-                    "description": "Search process logs with optional regex pattern, context lines, and head/tail limiting",
+                    "description": "Search process logs with optional regex pattern, context lines, and head/tail limiting. Execution order: pattern matching → context expansion → head/tail limiting",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -133,23 +133,23 @@ impl AppState {
                             },
                             "pattern": {
                                 "type": "string",
-                                "description": "Optional regex pattern to search for"
+                                "description": "Optional regex pattern (Rust regex syntax, case-sensitive). Examples: 'ERROR|WARN' (OR), 'started.*server' (wildcards), '\\\\d{3}' (digits). Matched lines prefixed with ' * ', context lines with '   '"
                             },
                             "context_lines": {
                                 "type": "number",
-                                "description": "Number of context lines around matches"
+                                "description": "Number of lines to show before and after each match. Only applies when pattern is provided"
                             },
                             "head": {
                                 "type": "number",
-                                "description": "Return only first N lines"
+                                "description": "Return only first N lines (applied after pattern/context). Mutually exclusive with tail"
                             },
                             "tail": {
                                 "type": "number",
-                                "description": "Return only last N lines"
+                                "description": "Return only last N lines (applied after pattern/context). Takes precedence over head if both specified"
                             },
                             "index": {
                                 "type": "number",
-                                "description": "Log instance index (negative for recent, e.g. -1 = most recent)"
+                                "description": "Log instance index. Negative = recent (-1 most recent, -2 second-to-last), positive = absolute (0 first, 1 second). Default: -1"
                             }
                         },
                         "required": ["process"]
@@ -157,7 +157,7 @@ impl AppState {
                 },
                 {
                     "name": "search_build_log",
-                    "description": "Search build logs with optional regex pattern, context lines, and head/tail limiting",
+                    "description": "Search build logs with optional regex pattern, context lines, and head/tail limiting. Execution order: pattern matching → context expansion → head/tail limiting",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -167,23 +167,23 @@ impl AppState {
                             },
                             "pattern": {
                                 "type": "string",
-                                "description": "Optional regex pattern to search for"
+                                "description": "Optional regex pattern (Rust regex syntax, case-sensitive). Examples: 'ERROR|WARN' (OR), 'started.*server' (wildcards), '\\\\d{3}' (digits). Matched lines prefixed with ' * ', context lines with '   '"
                             },
                             "context_lines": {
                                 "type": "number",
-                                "description": "Number of context lines around matches"
+                                "description": "Number of lines to show before and after each match. Only applies when pattern is provided"
                             },
                             "head": {
                                 "type": "number",
-                                "description": "Return only first N lines"
+                                "description": "Return only first N lines (applied after pattern/context). Mutually exclusive with tail"
                             },
                             "tail": {
                                 "type": "number",
-                                "description": "Return only last N lines"
+                                "description": "Return only last N lines (applied after pattern/context). Takes precedence over head if both specified"
                             },
                             "index": {
                                 "type": "number",
-                                "description": "Log instance index (negative for recent, e.g. -1 = most recent)"
+                                "description": "Log instance index. Negative = recent (-1 most recent, -2 second-to-last), positive = absolute (0 first, 1 second). Default: -1"
                             }
                         },
                         "required": ["process"]
