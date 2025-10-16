@@ -17,7 +17,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{info, warn};
+use tracing::{info, warn, trace};
 
 use crate::builder::Builder;
 use crate::config::{Config, ProcessType};
@@ -95,11 +95,11 @@ impl AppState {
                 }
             }
             "tools/list" => {
-                info!("Received tools/list request");
+                trace!("Received tools/list request");
                 self.handle_list_tools(id).await
             }
             "tools/call" => {
-                info!("Received tools/call request");
+                trace!("Received tools/call request");
                 self.mode_manager.record_tool_call().await;
                 self.handle_tool_call(id, request.params).await
             }
