@@ -1,12 +1,23 @@
 use anyhow::{Context, Result};
+use axum::{
+    extract::{Json, State},
+    http::{header, Method},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
+    routing::post,
+    Router,
+};
+use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{info, warn};
 
 use crate::builder::Builder;
 use crate::config::{Config, ProcessType};
@@ -37,88 +48,28 @@ struct JsonRpcError {
     message: String,
 }
 
-pub struct McpServer {
-    config: Config,
+#[derive(Clone)]
+pub struct AppState {
     processes: Arc<RwLock<HashMap<String, Arc<ProcessManager>>>>,
     builder: Arc<Builder>,
     mode_manager: Arc<ModeManager>,
     crash_handlers: Arc<RwLock<HashMap<String, CrashHandler>>>,
 }
 
-impl McpServer {
+impl AppState {
     pub fn new(
-        config: Config,
+        _config: Config,
         processes: Arc<RwLock<HashMap<String, Arc<ProcessManager>>>>,
         builder: Arc<Builder>,
         mode_manager: Arc<ModeManager>,
         crash_handlers: Arc<RwLock<HashMap<String, CrashHandler>>>,
     ) -> Self {
         Self {
-            config,
             processes,
             builder,
             mode_manager,
             crash_handlers,
         }
-    }
-
-    pub async fn start(&self, port: u16) -> Result<()> {
-        let listener = TcpListener::bind(("127.0.0.1", port))
-            .await
-            .context("Failed to bind to port")?;
-
-        info!("MCP server listening on port {}", port);
-
-        loop {
-            let (stream, addr) = listener.accept().await?;
-            info!("New connection from {}", addr);
-
-            let server = self.clone_for_connection();
-            tokio::spawn(async move {
-                if let Err(e) = server.handle_connection(stream).await {
-                    error!("Error handling connection: {}", e);
-                }
-            });
-        }
-    }
-
-    fn clone_for_connection(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            processes: self.processes.clone(),
-            builder: self.builder.clone(),
-            mode_manager: self.mode_manager.clone(),
-            crash_handlers: self.crash_handlers.clone(),
-        }
-    }
-
-    async fn handle_connection(&self, stream: TcpStream) -> Result<()> {
-        let (reader, mut writer) = stream.into_split();
-        let reader = BufReader::new(reader);
-        let mut lines = reader.lines();
-
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let request: JsonRpcRequest = match serde_json::from_str(&line) {
-                Ok(req) => req,
-                Err(e) => {
-                    error!("Failed to parse request: {}", e);
-                    continue;
-                }
-            };
-
-            let response = self.handle_request(request).await;
-
-            let response_json = serde_json::to_string(&response)?;
-            writer.write_all(response_json.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
-        }
-
-        Ok(())
     }
 
     async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
@@ -386,28 +337,42 @@ impl McpServer {
             .clone();
         drop(processes);
 
+        // Set manual restart flag to prevent crash monitor interference
+        process.set_manual_restart_flag().await;
+
         // Switch back to dev mode on restart
         self.mode_manager.switch_to_dev().await;
         let mode = self.mode_manager.get_mode().await;
 
-        // Stop the current process
-        process.stop().await?;
-
-        // Build if Rust
-        match process.config.process_type {
+        // Build FIRST (while old process keeps running)
+        let binary_path = match process.config.process_type {
             ProcessType::Rust => {
                 let release = matches!(mode, RunMode::Release);
-                let binary_path = self
+                Some(self
                     .builder
                     .build_rust(release, process.build_logs.clone())
-                    .await?;
+                    .await?)
+            }
+            ProcessType::Npm => None,
+        };
 
-                process.spawn_process(binary_path).await?;
+        // Now stop the old process
+        process.stop().await?;
+
+        // Start the new process
+        match process.config.process_type {
+            ProcessType::Rust => {
+                if let Some(binary_path) = binary_path {
+                    process.spawn_process(binary_path).await?;
+                }
             }
             ProcessType::Npm => {
                 process.spawn_npm_process().await?;
             }
         }
+
+        // Clear manual restart flag
+        process.clear_manual_restart_flag().await;
 
         // Reset crash handler
         let mut handlers = self.crash_handlers.write().await;
@@ -466,4 +431,53 @@ impl McpServer {
 
         Ok(status)
     }
+}
+
+async fn handle_post(
+    State(state): State<AppState>,
+    Json(request): Json<JsonRpcRequest>,
+) -> Response {
+    let response = state.handle_request(request).await;
+    Json(response).into_response()
+}
+
+async fn handle_get(
+    State(_state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // For now, we just send keep-alive events
+    // In the future, this could be used for server-initiated messages
+    let stream = stream::iter(vec![
+        Ok(Event::default().comment("connected")),
+    ]);
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+pub async fn create_router(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([header::CONTENT_TYPE]);
+
+    Router::new()
+        .route("/mcp", post(handle_post).get(handle_get))
+        .layer(cors)
+        .with_state(state)
+}
+
+pub async fn start_server(state: AppState, port: u16) -> Result<()> {
+    let app = create_router(state).await;
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .context(format!("Failed to bind to {}", addr))?;
+
+    info!("MCP HTTP server listening on http://{}/mcp", addr);
+
+    axum::serve(listener, app)
+        .await
+        .context("Server error")?;
+
+    Ok(())
 }

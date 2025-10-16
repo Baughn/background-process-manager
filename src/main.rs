@@ -10,7 +10,7 @@ use anyhow::Result;
 use builder::Builder;
 use config::{Config, ProcessType};
 use crash_handler::{CrashHandler, RunMode};
-use mcp_server::McpServer;
+use mcp_server::{AppState, start_server};
 use mode::ModeManager;
 use process::ProcessManager;
 use std::collections::HashMap;
@@ -130,6 +130,12 @@ async fn main() -> Result<()> {
                     // Wait for process to exit
                     process.wait_for_exit().await;
 
+                    // Check if this is a manual restart - if so, skip the automatic restart logic
+                    if process.is_manual_restart_in_progress().await {
+                        info!("Process {} stopped for manual restart, skipping automatic restart", name);
+                        continue;
+                    }
+
                     // Get crash handler and wait before restart
                     let mode = mode_manager.get_mode().await;
                     {
@@ -212,7 +218,7 @@ async fn main() -> Result<()> {
     });
 
     // Start MCP server
-    let mcp_server = McpServer::new(
+    let app_state = AppState::new(
         config.clone(),
         processes.clone(),
         builder.clone(),
@@ -220,8 +226,8 @@ async fn main() -> Result<()> {
         crash_handlers.clone(),
     );
 
-    info!("Starting MCP server on port {}", config.mcp_port);
-    mcp_server.start(config.mcp_port).await?;
+    info!("Starting MCP HTTP server on port {}", config.mcp_port);
+    start_server(app_state, config.mcp_port).await?;
 
     Ok(())
 }

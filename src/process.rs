@@ -56,6 +56,7 @@ pub struct ProcessManager {
     pub events: RwLock<Vec<ProcessEvent>>,
     child: RwLock<Option<Child>>,
     has_direnv: bool,
+    manual_restart_in_progress: RwLock<bool>,
 }
 
 impl ProcessManager {
@@ -73,6 +74,7 @@ impl ProcessManager {
             events: RwLock::new(Vec::new()),
             child: RwLock::new(None),
             has_direnv,
+            manual_restart_in_progress: RwLock::new(false),
         }
     }
 
@@ -214,84 +216,157 @@ impl ProcessManager {
     pub async fn stop(&self) -> Result<()> {
         info!("Stopping process: {}", self.name);
 
-        let mut child = self.child.write().await;
-        if let Some(ref mut child) = *child {
-            // Send SIGTERM
+        // Get PID and send SIGTERM
+        let pid = {
+            info!("Acquiring child lock to get PID for {}", self.name);
+            let mut child = self.child.write().await;
+            info!("Got child lock for {}", self.name);
+            if let Some(ref mut child) = *child {
+                let pid = child.id().map(|id| id as i32);
+                info!("Got PID {:?} for {}", pid, self.name);
+                pid
+            } else {
+                info!("No child process found for {}", self.name);
+                None
+            }
+        };
+
+        if let Some(pid) = pid {
             #[cfg(unix)]
             {
                 use nix::sys::signal::{self, Signal};
                 use nix::unistd::Pid;
 
-                if let Some(pid) = child.id() {
-                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                info!("Sending SIGTERM to {} (PID {})", self.name, pid);
+                let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
+                info!("SIGTERM sent to {} (PID {})", self.name, pid);
 
-                    // Wait up to 5 seconds for graceful shutdown
-                    let timeout = Duration::from_secs(5);
-                    let start = std::time::Instant::now();
+                // Wait up to 5 seconds for graceful shutdown WITHOUT holding lock
+                let timeout = Duration::from_secs(5);
+                let start = std::time::Instant::now();
 
-                    while start.elapsed() < timeout {
-                        match child.try_wait() {
-                            Ok(Some(_)) => {
-                                info!("Process {} terminated gracefully", self.name);
-                                *self.state.write().await = ProcessState::Idle;
-                                return Ok(());
-                            }
-                            _ => {
-                                sleep(Duration::from_millis(100)).await;
+                let mut terminated = false;
+                let mut check_count = 0;
+                while start.elapsed() < timeout {
+                    check_count += 1;
+                    if check_count % 10 == 0 {
+                        info!("Still waiting for {} to terminate (check {})", self.name, check_count);
+                    }
+                    {
+                        let mut child = self.child.write().await;
+                        if let Some(ref mut child) = *child {
+                            if let Ok(Some(_)) = child.try_wait() {
+                                info!("Process {} terminated gracefully after {} checks", self.name, check_count);
+                                terminated = true;
+                                break;
                             }
                         }
-                    }
+                    } // Lock dropped here
+                    sleep(Duration::from_millis(100)).await;
+                }
 
-                    // Force kill if still running
-                    warn!("Process {} did not terminate gracefully, sending SIGKILL", self.name);
-                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                if !terminated {
+                    warn!("Process {} did not terminate gracefully after {} checks, sending SIGKILL", self.name, check_count);
+                    let _ = signal::kill(Pid::from_raw(pid), Signal::SIGKILL);
+                    info!("SIGKILL sent to {} (PID {})", self.name, pid);
+                    sleep(Duration::from_millis(500)).await; // Give it time to die
+                    info!("Finished waiting after SIGKILL for {}", self.name);
                 }
             }
 
             #[cfg(not(unix))]
             {
-                child.kill().await.context("Failed to kill process")?;
+                let mut child = self.child.write().await;
+                if let Some(ref mut child) = *child {
+                    child.kill().await.context("Failed to kill process")?;
+                }
             }
         }
 
+        info!("Setting state to Idle for {}", self.name);
         *self.state.write().await = ProcessState::Idle;
         info!("Process {} stopped", self.name);
         Ok(())
     }
 
     pub async fn wait_for_exit(&self) -> Option<i32> {
-        let mut child = self.child.write().await;
-        if let Some(ref mut child) = *child {
-            match child.wait().await {
-                Ok(status) => {
+        info!("Starting wait_for_exit for {}", self.name);
+
+        // Poll for exit without holding the lock
+        loop {
+            let result = {
+                let mut child = self.child.write().await;
+                if let Some(ref mut child) = *child {
+                    child.try_wait()
+                } else {
+                    info!("No child in wait_for_exit for {}", self.name);
+                    return None;
+                }
+            };
+
+            match result {
+                Ok(Some(status)) => {
                     let exit_code = status.code();
-                    *self.state.write().await = ProcessState::Crashed;
+                    info!("Process {} exited with code {:?}", self.name, exit_code);
 
-                    self.events.write().await.push(ProcessEvent::Crashed {
-                        timestamp: Utc::now(),
-                        exit_code,
-                    });
+                    // Check if this is a manual restart
+                    let is_manual_restart = self.is_manual_restart_in_progress().await;
 
-                    error!(
-                        "Process {} exited with code {:?}",
-                        self.name, exit_code
-                    );
-                    exit_code
+                    if is_manual_restart {
+                        info!("Process {} stopped for manual restart, not marking as crashed", self.name);
+                        *self.state.write().await = ProcessState::Idle;
+                    } else {
+                        *self.state.write().await = ProcessState::Crashed;
+
+                        self.events.write().await.push(ProcessEvent::Crashed {
+                            timestamp: Utc::now(),
+                            exit_code,
+                        });
+
+                        error!(
+                            "Process {} exited with code {:?}",
+                            self.name, exit_code
+                        );
+                    }
+                    return exit_code;
+                }
+                Ok(None) => {
+                    // Still running, sleep and check again
+                    sleep(Duration::from_millis(100)).await;
                 }
                 Err(e) => {
                     error!("Error waiting for process {}: {}", self.name, e);
-                    *self.state.write().await = ProcessState::Crashed;
 
-                    self.events.write().await.push(ProcessEvent::Crashed {
-                        timestamp: Utc::now(),
-                        exit_code: None,
-                    });
-                    None
+                    let is_manual_restart = self.is_manual_restart_in_progress().await;
+
+                    if !is_manual_restart {
+                        *self.state.write().await = ProcessState::Crashed;
+
+                        self.events.write().await.push(ProcessEvent::Crashed {
+                            timestamp: Utc::now(),
+                            exit_code: None,
+                        });
+                    } else {
+                        *self.state.write().await = ProcessState::Idle;
+                    }
+                    return None;
                 }
             }
-        } else {
-            None
         }
+    }
+
+    pub async fn set_manual_restart_flag(&self) {
+        *self.manual_restart_in_progress.write().await = true;
+        info!("Manual restart flag set for {}", self.name);
+    }
+
+    pub async fn clear_manual_restart_flag(&self) {
+        *self.manual_restart_in_progress.write().await = false;
+        info!("Manual restart flag cleared for {}", self.name);
+    }
+
+    pub async fn is_manual_restart_in_progress(&self) -> bool {
+        *self.manual_restart_in_progress.read().await
     }
 
     pub async fn get_uptime(&self) -> Option<chrono::Duration> {

@@ -135,12 +135,13 @@ Get status of all processes including mode, uptime, state, and recent events.
 ### Zero-Downtime Restart
 
 When you call `restart`:
-1. Build starts in the background
-2. Old process keeps running
+1. Manual restart flag is set to prevent crash monitor interference
+2. Build starts in the background (while old process keeps running)
 3. Once build completes, old process is stopped (SIGTERM, 5s grace period, then SIGKILL)
 4. New process starts immediately
+5. Manual restart flag is cleared
 
-This means compilation time doesn't add to downtime - only the brief moment to swap processes.
+This means compilation time doesn't add to downtime - only the brief moment to swap processes. The manual restart flag ensures the crash monitor doesn't interfere and that the restart isn't counted as a crash.
 
 ### Direnv Support
 
@@ -153,6 +154,26 @@ All output from managed processes and builds is:
 - Passed through to stdout/stderr with `[process_name]` or `[build]` prefixes
 
 This means logs appear in journalctl when running as a systemd service, while still being available for search through the MCP interface.
+
+## Connecting with Claude Code
+
+Add the MCP server to your Claude Code configuration (`~/.config/claude-code/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ganbot": {
+      "url": "http://localhost:3001/mcp"
+    }
+  }
+}
+```
+
+Once connected, you can use the MCP tools directly in Claude Code:
+- `search_logs` - Search process logs for errors or patterns
+- `search_build_log` - Check build output for compilation issues
+- `restart` - Rebuild and restart your process after code changes
+- `get_status` - Check current mode, uptime, and recent events
 
 ## Example: Using with ganbot
 
@@ -170,21 +191,21 @@ EOF
 # Start the manager
 background-process-manager ~/dev/ganbot
 
-# In another terminal, connect via MCP and call tools:
-# - search_logs to see what's happening
-# - restart to rebuild and restart after code changes
-# - get_status to see current mode and uptime
+# Now connect from Claude Code using the configuration above
 ```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────┐
-│  MCP Client (Claude)                │
+│  MCP Client (Claude Code)           │
 └─────────────┬───────────────────────┘
-              │ JSON-RPC over TCP
+              │ JSON-RPC over HTTP/SSE
 ┌─────────────▼───────────────────────┐
-│  MCP Server (port 3001)             │
+│  MCP HTTP Server (port 3001)        │
+│  Endpoint: /mcp                     │
+│                                     │
+│  Tools:                             │
 │  - search_logs                      │
 │  - search_build_log                 │
 │  - restart                          │
@@ -204,6 +225,7 @@ background-process-manager ~/dev/ganbot
 │ - Spawn/Stop                 │
 │ - Log capture                │
 │ - Crash detection            │
+│ - Manual restart flag        │
 └───┬──────────────────────────┘
     │
 ┌───▼──────────────────────────┐
